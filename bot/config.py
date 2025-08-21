@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
+    webhook_url: str = ""
 
 
 def _try_load_env_from(path: Path) -> None:
@@ -55,4 +56,7 @@ def load_settings() -> Settings:
     if not token:
         raise RuntimeError("Переменная окружения BOT_TOKEN не задана. Укажи её в .env")
 
-    return Settings(bot_token=token)
+    # Загружаем URL webhook (опционально)
+    webhook_url = os.getenv("WEBHOOK_URL", "").strip()
+
+    return Settings(bot_token=token, webhook_url=webhook_url)
