@@ -102,6 +102,13 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
+    # Локальный запуск (polling): убираем вебхук, чтобы не было конфликта
+    if not settings.webhook_url:
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+        except Exception:
+            pass
+
     await bot.set_my_commands(
         [
             BotCommand(command="start", description="Начать"),

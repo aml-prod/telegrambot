@@ -2,119 +2,113 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+import threading
+from typing import Optional
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Update
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
+from aiogram.types import BotCommand, Update
 from flask import Flask, request
 
 from .config import load_settings
 from .main import router
 
-
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# Глобальные переменные для бота
-bot: Bot | None = None
-dp: Dispatcher | None = None
+bot: Optional[Bot] = None
+dp: Optional[Dispatcher] = None
+
+# Один общий event loop в отдельном потоке
+bg_loop = asyncio.new_event_loop()
+_ready = threading.Event()
+
+
+def _loop_thread() -> None:
+    asyncio.set_event_loop(bg_loop)
+    bg_loop.run_forever()
+
+
+threading.Thread(target=_loop_thread, name="aiogram-loop", daemon=True).start()
+
+
+async def _async_setup() -> None:
+    global bot, dp
+    settings = load_settings()
+
+    bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+
+    # локальная инициализация
+    await dp.emit_startup(bot)
+
+    # Сразу считаем приложение готовым (исключаем зависания на сетевых вызовах)
+    _ready.set()
+    logger.info("Bot initialized (ready)")
+
+    # Сетевые операции НЕ блокируют готовность
+    try:
+        asyncio.create_task(
+            bot.set_my_commands(
+                [
+                    BotCommand(command="start", description="Начать"),
+                    BotCommand(command="help", description="Помощь"),
+                ]
+            )
+        )
+    except Exception as e:
+        logger.warning("set_my_commands scheduled with error: %s", e)
+
+
+# Инициализация бота в фоновом loop
+asyncio.run_coroutine_threadsafe(_async_setup(), bg_loop)
 
 
 def create_flask_app() -> Flask:
-    """Создаёт Flask-приложение с webhook для Telegram бота."""
     app = Flask(__name__)
-    
-    @app.route("/", methods=["GET"])
-    def health_check() -> dict[str, str]:
-        """Проверка здоровья приложения."""
-        return {"status": "OK", "message": "Telegram Photo Caption Bot is running"}
-    
-    @app.route("/webhook", methods=["POST"])
+
+    @app.get("/")
+    def health() -> dict[str, str]:
+        return {
+            "status": "ready" if _ready.is_set() else "initializing",
+            "message": "Telegram Photo Caption Bot is running",
+        }
+
+    @app.post("/webhook")
     def webhook() -> tuple[str, int]:
-        """Обработчик webhook от Telegram."""
-        if not bot or not dp:
-            logger.error("Bot or dispatcher not initialized")
-            return "Bot not ready", 500
-            
-        try:
-            # Получаем данные от Telegram
-            update_data = request.get_json()
-            if not update_data:
-                return "No data", 400
-                
-            # Создаём объект Update
-            update = Update(**update_data)
-            
-            # Обрабатываем update асинхронно
-            asyncio.create_task(dp.feed_update(bot, update))
-            
+        # Всегда быстрое 200 — Telegram не будет ждать 60 сек и ставить 499
+        if not _ready.is_set() or bot is None or dp is None:
+            logger.warning("Webhook hit while not ready")
             return "OK", 200
-            
+
+        payload = request.get_json(silent=True)
+        if not payload:
+            return "OK", 200
+
+        try:
+            update = Update.model_validate(payload)
         except Exception as e:
-            logger.error(f"Error processing webhook: {e}")
-            return "Error", 500
-    
+            logger.exception("Update validation error: %s", e)
+            return "OK", 200
+
+        try:
+            fut = asyncio.run_coroutine_threadsafe(dp.feed_update(bot, update), bg_loop)
+
+            def _cb(f) -> None:
+                exc = f.exception()
+                if exc:
+                    logger.exception("feed_update error: %s", exc)
+
+            fut.add_done_callback(_cb)
+        except Exception as e:
+            logger.exception("Scheduling error: %s", e)
+
+        return "OK", 200
+
     return app
 
 
-async def setup_bot() -> None:
-    """Инициализация бота и диспетчера."""
-    global bot, dp
-    
-    settings = load_settings()
-    
-    bot = Bot(
-        token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-    
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(router)
-    
-    # Устанавливаем webhook, если указан URL
-    webhook_url = getattr(settings, 'webhook_url', None)
-    if webhook_url:
-        await bot.set_webhook(
-            url=f"{webhook_url}/webhook",
-            allowed_updates=dp.resolve_used_update_types(),
-        )
-        logger.info(f"Webhook set to: {webhook_url}/webhook")
-    
-    # Устанавливаем команды бота
-    from aiogram.types import BotCommand
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Начать"),
-        BotCommand(command="help", description="Помощь"),
-    ])
-    
-    logger.info("Bot initialized successfully")
-
-
-# Создаём Flask приложение
 flask_app = create_flask_app()
-
-
-def run_setup() -> None:
-    """Запускает инициализацию бота в новом event loop."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(setup_bot())
-    finally:
-        loop.close()
-
-
-# Инициализируем бота при импорте модуля
-try:
-    run_setup()
-except Exception as e:
-    logger.error(f"Failed to initialize bot: {e}")
