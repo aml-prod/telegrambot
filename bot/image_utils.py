@@ -4,17 +4,34 @@ import io
 from typing import List
 
 from PIL import Image, ImageDraw, ImageFont
-
+from pathlib import Path
+import os
 
 def _load_font(image_width: int) -> ImageFont.ImageFont:
     base_size = max(18, int(image_width * 0.06))
-    try:
-        return ImageFont.truetype("DejaVuSans.ttf", base_size)
-    except OSError:
+    here = Path(__file__).resolve().parent.parent
+    candidates = []
+
+    env_path = os.getenv("WATERMARK_FONT_PATH")
+    if env_path:
+        candidates.append(Path(env_path))
+
+    candidates += [
+        here / "fonts" / "NotoSans-Regular.ttf",
+        here / "fonts" / "DejaVuSans.ttf",
+        Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/usr/share/fonts/truetype/freefont/FreeSans.ttf"),
+    ]
+
+    for p in candidates:
         try:
-            return ImageFont.truetype("arial.ttf", base_size)
-        except OSError:
-            return ImageFont.load_default()
+            if p and p.exists():
+                return ImageFont.truetype(str(p), base_size)
+        except Exception:
+            continue
+
+    return ImageFont.load_default()
 
 
 def _wrap_text_by_width(
