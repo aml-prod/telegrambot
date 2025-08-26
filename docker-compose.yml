@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  link_server:
+    build: .
+    image: photo-bot:latest
+    command: python -m bot.link_server
+    ports:
+      - "8080:8080"              # локальный просмотр http://SERVER_IP:8080
+    environment:
+      # Можно задать шрифт, если нужно: WATERMARK_FONT_PATH=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - storage:/app/storage
+
+  bot:
+    build: .
+    image: photo-bot:latest
+    depends_on:
+      - link_server
+    environment:
+      - PYTHONUNBUFFERED=1
+      - BOT_TOKEN=${BOT_TOKEN}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL}  # например https://links.client.com
+      # - WATERMARK_FONT_PATH=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+    volumes:
+      - storage:/app/storage
+    command: python -m bot
+
+  # Опционально: Cloudflare Named Tunnel (профиль cf). Нужны готовые credentials и config.yml
+  cloudflared:
+    profiles: ["cf"]
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      - link_server
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro  # см. пример конфига ниже
+    command: tunnel run
+
+volumes:
+  storage:
